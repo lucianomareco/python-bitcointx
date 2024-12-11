@@ -1156,7 +1156,7 @@ class CScript(bytes, ScriptCoinClass, next_dispatch_final=True):
                         annex_hash: Optional[bytes] = None
                         ) -> bytes:
 
-        # Only BIP342 tapscript signing is supported for now.
+        # Only BIP342 tapscript and key path signing is supported for now.
         leaf_version = bitcointx.core.CoreCoinParams.TAPROOT_LEAF_TAPSCRIPT
         tapleaf_hash = bitcointx.core.CoreCoinParams.tapleaf_hasher(
             bytes([leaf_version]) + BytesSerializer.serialize(self)
@@ -1489,7 +1489,7 @@ def SignatureHashSchnorr(
     f.write(bytes([0]))
 
     # Hash type
-    if hashtype is None:
+    if hashtype is None or hashtype == SIGHASH_ALL:
         hashtype = SIGHASH_ALL
         hashtype_byte = b'\x00'
     else:
