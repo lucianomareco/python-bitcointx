@@ -3,7 +3,60 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/python-bitcointx.svg)](https://pypi.python.org/pypi/python-bitcointx)
 [![Build Status](https://github.com/Simplexum/python-bitcointx/actions/workflows/main.yml/badge.svg)](https://pypi.python.org/pypi/python-bitcointx)
 
-# python-bitcointx
+# python-bitcointx with taproot psbt signature support
+*by ZKP and ZKY* 
+
+## Local Installation Guide for python-bitcointx 
+
+Follow these instructions to set up the `python-bitcointx` library locally.
+
+### Step 1: Create the `lib` Directory
+
+Create a directory named `lib` in the root of your project.
+
+```bash
+mkdir lib
+```
+
+### Step 2: Clone the Repository
+Clone the python-bitcointx repository into the lib directory.
+
+```bash
+cd lib
+git clone https://github.com/lucianomareco/python-bitcointx
+```
+
+### Step 3: Uninstall the Existing Library
+Uninstall the currently used python-bitcointx library.
+
+```bash
+cd ..
+pip uninstall python-bitcointx
+```
+
+### Step 4: Install Dependencies
+Update your system and install the necessary dependencies.
+
+```bash
+sudo apt update
+sudo apt install -y build-essential libffi-dev libssl-dev libgmp-dev libsecp256k1-dev curl pkg-config
+```
+
+### Step 5: Install the Local Library
+Install the locally cloned python-bitcointx library in editable mode.
+
+```bash
+pip install -e ./lib/python-bitcointx
+You are now ready to use the python-bitcointx library from your local setup! 🚀
+```
+
+Note: 
+
+``` 
+If you are using this version in your local, we recommend remove python-bitcontx from your requirements.txt file to prevent replace your local lib
+```
+
+---
 
 This Python3 library provides an easy interface to the bitcoin transaction data
 structures. This is based on https://github.com/petertodd/python-bitcoinlib,

@@ -11,6 +11,11 @@
 
 # pylama:ignore=C901,E221
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 from typing import (
     TypeVar, Tuple, List, Dict, Set, Union, Type, Any, Optional, Generator,
     NamedTuple, Callable, Collection
@@ -2332,6 +2337,7 @@ class PartiallySignedTransaction(PSBT_CoinClass, next_dispatch_final=True):
              ] = StandardMultisigSignatureHelper.__call__,
              finalize: bool = True,
              ) -> PSBT_SignResult:
+        logger.info(f"Signing PSBT python-bitcointx lib ZKP-ZKY")
         self._check_consistency()
 
         inputs_sign_info: List[Optional[PSBT_InputSignInfo]] = []
