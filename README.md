@@ -4,7 +4,7 @@
 [![Build Status](https://github.com/Simplexum/python-bitcointx/actions/workflows/main.yml/badge.svg)](https://pypi.python.org/pypi/python-bitcointx)
 
 # python-bitcointx with taproot psbt signature support
-*by ZKP and ZKY* 
+*by Luciano Mareco* 
 
 ## Local Installation Guide for python-bitcointx 
 
