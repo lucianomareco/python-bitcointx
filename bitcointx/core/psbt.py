@@ -11,6 +11,11 @@
 
 # pylama:ignore=C901,E221
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 from typing import (
     TypeVar, Tuple, List, Dict, Set, Union, Type, Any, Optional, Generator,
     NamedTuple, Callable, Collection
@@ -37,11 +42,11 @@ from . import (
 from .key import CPubKey, BIP32Path, KeyDerivationInfo, KeyStore
 from .script import (
     CScript, CScriptWitness, SIGHASH_ALL, SIGHASH_Type,
-    SIGVERSION_BASE, SIGVERSION_WITNESS_V0,
-    ComplexScriptSignatureHelper, StandardMultisigSignatureHelper,
+    SIGVERSION_BASE, SIGVERSION_WITNESS_V0, SIGVERSION_TAPROOT,
+    ComplexScriptSignatureHelper, SignatureHashSchnorr, StandardMultisigSignatureHelper,
     standard_keyhash_scriptpubkey
 )
-from ..wallet import CCoinExtPubKey
+from ..wallet import CCoinExtPubKey, CCoinKey
 
 from ..util import (
     ensure_isinstance, no_bool_use_as_property, assert_never,
@@ -100,6 +105,8 @@ class PSBT_InKeyType(Enum):
     FINAL_SCRIPTSIG     = 0x07
     FINAL_SCRIPTWITNESS = 0x08
     POR_COMMITMENT      = 0x09
+    TAPROOT_KEY_PATH_SIG = 0x13
+    TAPROOT_INTERNAL_KEY = 0x17
 
 
 class PSBT_OutKeyType(Enum):
@@ -398,6 +405,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
     final_script_witness: CScriptWitness
     proof_of_reserves_commitment: bytes
     proprietary_fields: Dict[bytes, List[PSBT_ProprietaryTypeData]]
+    taproot_internal_key: Optional[CPubKey]
+    taproot_key_path_sig: Optional[CScript]
     unknown_fields: List[PSBT_UnknownTypeData]
     # NOTE: if you add a field, don't forget to specify it in merge()
 
@@ -416,6 +425,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
         proprietary_fields: Optional[Dict[
             bytes, List[PSBT_ProprietaryTypeData]
         ]] = None,
+        taproot_internal_key: Optional[CPubKey] = None,
+        taproot_key_path_sig: Optional[CScript] = None,
         unknown_fields: Optional[List[PSBT_UnknownTypeData]] = None,
 
         allow_unknown_sighash_types: bool = False,
@@ -522,6 +533,16 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
                           f'prefix {b2x(prefix)}'))
 
         self.proprietary_fields = proprietary_fields
+        
+        if taproot_internal_key is not None:
+            ensure_isinstance(taproot_internal_key, CPubKey, descr('taproot internal key'))
+
+        self.taproot_internal_key = taproot_internal_key
+        
+        if taproot_key_path_sig is not None:
+            ensure_isinstance(taproot_key_path_sig, CScript,
+                              descr('taproot key path signature'))
+        self.taproot_key_path_sig = taproot_key_path_sig
 
         if unknown_fields is None:
             unknown_fields = []
@@ -784,6 +805,12 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
 
         if not self.final_script_witness:
             self.final_script_witness = other.final_script_witness
+            
+        if not self.taproot_internal_key:
+            self.taproot_internal_key = other.taproot_internal_key
+        
+        if not self.taproot_key_path_sig:
+            self.taproot_key_path_sig = other.taproot_key_path_sig
 
         # should we check if commitments match when present in both instnaces ?
         if not self.proof_of_reserves_commitment:
@@ -807,6 +834,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
             and (not self.final_script_sig)
             and (not self.final_script_witness)
             and (not self.proprietary_fields)
+            and (not self.taproot_internal_key)
+            and (not self.taproot_key_path_sig)
             and (not self.unknown_fields)
         )
 
@@ -944,7 +973,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
              complex_script_helper_factory: Callable[
                  [CScript], ComplexScriptSignatureHelper
              ] = StandardMultisigSignatureHelper.__call__,
-             finalize: bool = True
+             finalize: bool = True,
+             inputs: List[T_PSBT_Input] = None,
              ) -> Optional[PSBT_InputSignInfo]:
         """Sign the input using keys available from `key_store`.
         `complex_script_helper_factory`, given the script, should return
@@ -1080,6 +1110,55 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
                 return self._maybe_sign_complex_script(
                     msig_helper, signer, is_witness=True,
                     script_sig_for_witness=script_sig, finalize=finalize)
+            elif s.is_witness_v1_taproot():
+                if self.final_script_witness:
+                    return None
+                if not hasattr(self, "taproot_internal_key") or not self.taproot_internal_key:
+                    return PSBT_InputSignInfo(
+                        num_new_sigs=0, num_sigs_missing=1, is_final=False
+                    )
+                # Taproot signature hashing (BIP-341)
+                assert isinstance(utxo, CTxOut)
+
+                # Calculate Taproot signature hash
+                
+                spent_outputs = []
+                if inputs is not None:
+                    for input in inputs:
+                        if input.utxo:
+                            utxo = input.utxo
+                            spent_outputs.append(utxo)
+                        else:
+                            raise ValueError(f"Missing UTXO for PSBT input: {input}")
+                else:
+                    return None  # Not signable, we don't have utxo at all
+                
+                sh = SignatureHashSchnorr(
+                    unsigned_tx, self.index, spent_outputs,
+                    sigversion=SIGVERSION_TAPROOT,
+                    hashtype=sighash_type, 
+                )
+                pubkey = self.taproot_internal_key
+                derinfo = self.derivation_map.get(pubkey)
+                privkey = key_store.get_privkey(pubkey.key_id, derinfo)
+
+                if not privkey:
+                    return PSBT_InputSignInfo(
+                        num_new_sigs=0, num_sigs_missing=1, is_final=False
+                    )
+                k = CCoinKey.from_secret_bytes(privkey.secret_bytes)
+                mr = b''
+                sig = k.sign_schnorr_tweaked(sh, merkle_root=mr)
+                
+                if sighash_type == SIGHASH_ALL:
+                    self.final_script_witness = CScriptWitness([sig])
+                    
+                else:  #todo validate that is single | anyonecanpay and manage other cases
+                    self.taproot_key_path_sig = CScript(sig + b'\x83')
+                return PSBT_InputSignInfo(
+                    num_new_sigs=1, num_sigs_missing=0, is_final=True
+                )
+
             else:
                 return None  # unknown scriptpubkey type, cannot sign
 
@@ -1199,6 +1278,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
         proprietary_fields: Dict[
             bytes, List[PSBT_ProprietaryTypeData]
         ] = OrderedDict()
+        taproot_internal_key: Optional[CPubKey] = None
+        taproot_key_path_sig: Optional[CScript] = None
         unknown_fields: List[PSBT_UnknownTypeData] = []
 
         def descr(msg: str) -> str:
@@ -1288,6 +1369,21 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
             elif key_type is PSBT_InKeyType.POR_COMMITMENT:
                 ensure_empty_key_data(key_type, key_data, descr(''))
                 proof_of_reserves_commitment = value
+            elif key_type is PSBT_InKeyType.TAPROOT_INTERNAL_KEY:
+                ensure_empty_key_data(key_type, key_data, descr(''))
+                def xonly_to_compressed_pubkey(xonly_pubkey: bytes, even: bool = True) -> bytes:
+                    if len(xonly_pubkey) != 32:
+                        raise ValueError("x-only pubkey must be 32 bytes long.")
+                    return bytes([0x02 if even else 0x03]) + xonly_pubkey
+                compressed_pubkey = xonly_to_compressed_pubkey(value)
+                pub = CPubKey(compressed_pubkey)
+                if not pub.is_fullyvalid():
+                    raise SerializationError(
+                        descr(f'Invalid pubkey encountered in {key_type.name}'))
+                taproot_internal_key = pub
+            elif key_type is PSBT_InKeyType.TAPROOT_KEY_PATH_SIG:
+                ensure_empty_key_data(key_type, key_data, descr(''))
+                taproot_key_path_sig = CScript(value)
             else:
                 assert_never(key_type)
 
@@ -1312,6 +1408,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
                    final_script_witness=final_script_witness,
                    proof_of_reserves_commitment=proof_of_reserves_commitment,
                    proprietary_fields=proprietary_fields,
+                   taproot_internal_key=taproot_internal_key,
+                   taproot_key_path_sig=taproot_key_path_sig,
                    unknown_fields=unknown_fields,
                    index=index, force_witness_utxo=bool(witness_utxo),
                    **kwargs)
@@ -1372,6 +1470,20 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
         if self.proof_of_reserves_commitment:
             stream_serialize_field(PSBT_InKeyType.POR_COMMITMENT, f,
                                    value=self.proof_of_reserves_commitment)
+        if self.taproot_key_path_sig:
+            stream_serialize_field(PSBT_InKeyType.TAPROOT_KEY_PATH_SIG, f, value=self.taproot_key_path_sig)
+                                   
+        if self.taproot_internal_key and not self.final_script_witness:
+            def compressed_pubkey_to_xonly(compressed_pubkey: bytes) -> bytes:
+                if len(compressed_pubkey) != 33:
+                    raise ValueError("Compressed pubkey must be 33 bytes long.")
+                if compressed_pubkey[0] not in (0x02, 0x03):
+                    raise ValueError("Invalid prefix for a compressed pubkey.")
+                return compressed_pubkey[1:]
+
+            xonly_pubkey = compressed_pubkey_to_xonly(self.taproot_internal_key)
+            stream_serialize_field(PSBT_InKeyType.TAPROOT_INTERNAL_KEY, f,
+                                value=xonly_pubkey)
 
         stream_serialize_proprietary_fields(self.proprietary_fields, f)
         stream_serialize_unknown_fields(self.unknown_fields, f)
@@ -1418,6 +1530,8 @@ class PSBT_Input(PSBT_CoinClass, next_dispatch_final=True):
                 f"x('{b2x(self.proof_of_reserves_commitment)}')",
             'proprietary_fields':
                 f"{{{proprietary_field_repr(self.proprietary_fields)}}}",
+            'taproot_internal_key': f"x('{b2x(self.taproot_internal_key)}')" if self.taproot_internal_key else 'None',
+            'taproot_key_path_sig': repr(self.taproot_key_path_sig),
             'unknown_fields': f'[{unknown_fields_repr(self.unknown_fields)}]'
         })
 
@@ -2223,6 +2337,7 @@ class PartiallySignedTransaction(PSBT_CoinClass, next_dispatch_final=True):
              ] = StandardMultisigSignatureHelper.__call__,
              finalize: bool = True,
              ) -> PSBT_SignResult:
+        logger.info(f"Signing PSBT python-bitcointx lib ZKP-ZKY")
         self._check_consistency()
 
         inputs_sign_info: List[Optional[PSBT_InputSignInfo]] = []
@@ -2233,7 +2348,7 @@ class PartiallySignedTransaction(PSBT_CoinClass, next_dispatch_final=True):
             info = self.inputs[txin_index].sign(
                 self.unsigned_tx, key_store,
                 complex_script_helper_factory=complex_script_helper_factory,
-                finalize=finalize)
+                finalize=finalize, inputs=self.inputs)
             inputs_sign_info.append(info)
             if info:
                 if info.num_new_sigs:
